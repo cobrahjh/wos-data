@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Words on Stream — Auto Guesser (Local LLM)
 // @namespace    http://tampermonkey.net/
-// @version      4.32
+// @version      4.33
 // @updateURL    https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @downloadURL  https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @description  Twitch tab: scans video + auto-types chat. wos.gg tab: reads tiles from DOM, pre-generates words, hands them to the Twitch tab via GM shared storage. Dict-backed anagram solver (ENABLE1, public domain); text LLM removed; vision LLM kept for Twitch tile reading.
@@ -27,10 +27,11 @@
   // (subscription CLI, $0 marginal, ~15-35s/scan, very accurate). When false,
   // scan uses the local Ollama vision model (faster, less accurate).
   let useClaude     = GM_getValue('use_claude_vision', false);
-  // ENABLE1 — public-domain ~173k list of REAL words only (no abbreviations, no
-  // web-n-gram fragments). This is the locked clean default; the one-time reset
-  // below pulls everyone off any previously-loaded noisy/custom list back onto it.
-  const CLEAN_DICT_URL = 'https://raw.githubusercontent.com/dolph/dictionary/master/enable1.txt';
+  // Clean ENABLE1 (real words only — no abbreviations / web fragments) ordered by
+  // REAL word frequency, hosted in the public wos-data repo. The frequency order
+  // is what makes the grade fallback + common-first sorting work; plain
+  // alphabetical ENABLE1 starved the grade filter. Locked default; reset enforced below.
+  const CLEAN_DICT_URL = 'https://raw.githubusercontent.com/cobrahjh/wos-data/main/enable1-ranked.txt';
   let dictUrl       = GM_getValue('dict_url', CLEAN_DICT_URL);
   // Grade filter: 'all' disables it; otherwise 0 (K) … 12 keeps only words at or
   // below that US school grade (cumulative — easier words included). A word's
@@ -53,15 +54,16 @@
   // names before their original declaration sites would have run — TDZ
   // otherwise, and the failures are silent inside async functions.
   const DICT_CACHE_KEY = 'wos_dict_v1';
-  // One-time cleanup: an earlier build let a noisy ~606k web-frequency wordlist
-  // get cached, which surfaced non-words (e.g. "iowd", "goodl"). Force everyone
-  // back onto the clean ENABLE1 list once — reset the stored URL and drop the
-  // cached dictionary so it refetches clean. Guarded so it runs a single time.
-  if (!GM_getValue('dict_reset_clean_v1', false)) {
+  // One-time cleanup → reset onto the clean, frequency-ranked ENABLE1 list.
+  // (v1 was the noisy ~606k web-frequency list with non-words like "iowd"/"goodl";
+  // the first reset put us on plain alphabetical ENABLE1, which starved the grade
+  // filter. v2 moves to the frequency-ranked clean list.) Resets the stored URL
+  // and drops the cached dictionary so it refetches. Guarded — runs once per bump.
+  if (!GM_getValue('dict_reset_clean_v2', false)) {
     dictUrl = CLEAN_DICT_URL;
     GM_setValue('dict_url', CLEAN_DICT_URL);
     GM_setValue(DICT_CACHE_KEY, '');
-    GM_setValue('dict_reset_clean_v1', true);
+    GM_setValue('dict_reset_clean_v2', true);
   }
   let dictSet     = null;
   let dictByKey   = null;
