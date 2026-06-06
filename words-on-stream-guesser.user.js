@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Words on Stream — Auto Guesser (Local LLM)
 // @namespace    http://tampermonkey.net/
-// @version      4.26
+// @version      4.27
 // @updateURL    https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @downloadURL  https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @description  Twitch tab: scans video + auto-types chat. wos.gg tab: reads tiles from DOM, pre-generates words, hands them to the Twitch tab via GM shared storage. Dict-backed anagram solver (ENABLE1, public domain); text LLM removed; vision LLM kept for Twitch tile reading.
@@ -248,39 +248,6 @@
 <h3>⚡ WoS · Local LLM</h3>
 <div class="row"><button class="btn-ghost" id="wos-btn-help" style="flex:1;padding:4px 0;font-size:.62rem;">❓ How to use</button></div>
 
-<!-- Ollama config -->
-<div class="section">
-  <div class="section-title">Ollama Settings</div>
-  <div class="row">
-    <label>URL</label>
-    <input type="text" id="wos-ollama-base"  placeholder="http://localhost:11434"/>
-  </div>
-  <div class="row">
-    <label>Vision</label>
-    <input type="text" id="wos-vision-model" placeholder="llava"/>
-  </div>
-  <div class="row" style="font-size:.62rem;color:#c084fc;">
-    <label style="flex:none;cursor:pointer;">
-      <input type="checkbox" id="wos-use-claude" style="vertical-align:middle;margin-right:5px;"/>
-      Use Claude vision (slow, accurate)
-    </label>
-  </div>
-  <div class="row">
-    <label>Dict</label>
-    <input type="text" id="wos-dict-url" placeholder="wordlist URL"/>
-  </div>
-  <div class="row">
-    <button class="btn-ghost" id="wos-save-cfg"     style="flex:none;padding:5px 12px;font-size:.65rem;">💾 Save</button>
-    <button class="btn-ghost" id="wos-refresh-dict" style="flex:none;padding:5px 12px;font-size:.65rem;">🔁 Dict</button>
-    <span id="wos-cfg-status" style="font-size:.65rem;color:#4ade80;letter-spacing:1px;"></span>
-  </div>
-  <div class="row">
-    <label style="flex:none;">Or load file</label>
-    <input type="file" id="wos-dict-file" accept=".txt,text/plain" style="flex:1;color:#c084fc;font-size:.65rem;"/>
-  </div>
-  <div id="wos-dict-status" style="font-size:.62rem;color:#a78bfa;letter-spacing:1px;margin-top:4px;text-align:center;">📚 Dict not loaded</div>
-</div>
-
 <!-- Scan + letters -->
 <div class="section">
   <div class="section-title">1 · Scan Stream — tap chips to toggle fake</div>
@@ -330,6 +297,39 @@
     </select>
     <span id="wos-grade-status" style="flex:none;font-size:.58rem;color:#a78bfa;margin-left:4px;"></span>
   </div>
+</div>
+
+<!-- Ollama config (advanced — rarely touched, kept at the bottom) -->
+<div class="section">
+  <div class="section-title">Ollama Settings</div>
+  <div class="row">
+    <label>URL</label>
+    <input type="text" id="wos-ollama-base"  placeholder="http://localhost:11434"/>
+  </div>
+  <div class="row">
+    <label>Vision</label>
+    <input type="text" id="wos-vision-model" placeholder="llava"/>
+  </div>
+  <div class="row" style="font-size:.62rem;color:#c084fc;">
+    <label style="flex:none;cursor:pointer;">
+      <input type="checkbox" id="wos-use-claude" style="vertical-align:middle;margin-right:5px;"/>
+      Use Claude vision (slow, accurate)
+    </label>
+  </div>
+  <div class="row">
+    <label>Dict</label>
+    <input type="text" id="wos-dict-url" placeholder="wordlist URL"/>
+  </div>
+  <div class="row">
+    <button class="btn-ghost" id="wos-save-cfg"     style="flex:none;padding:5px 12px;font-size:.65rem;">💾 Save</button>
+    <button class="btn-ghost" id="wos-refresh-dict" style="flex:none;padding:5px 12px;font-size:.65rem;">🔁 Dict</button>
+    <span id="wos-cfg-status" style="font-size:.65rem;color:#4ade80;letter-spacing:1px;"></span>
+  </div>
+  <div class="row">
+    <label style="flex:none;">Or load file</label>
+    <input type="file" id="wos-dict-file" accept=".txt,text/plain" style="flex:1;color:#c084fc;font-size:.65rem;"/>
+  </div>
+  <div id="wos-dict-status" style="font-size:.62rem;color:#a78bfa;letter-spacing:1px;margin-top:4px;text-align:center;">📚 Dict not loaded</div>
 </div>
 
 <div id="wos-status" aria-live="polite">Ready — make sure Ollama is running</div>
