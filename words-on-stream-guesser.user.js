@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Words on Stream — Auto Guesser (Local LLM)
 // @namespace    http://tampermonkey.net/
-// @version      4.31
+// @version      4.32
 // @updateURL    https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @downloadURL  https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @description  Twitch tab: scans video + auto-types chat. wos.gg tab: reads tiles from DOM, pre-generates words, hands them to the Twitch tab via GM shared storage. Dict-backed anagram solver (ENABLE1, public domain); text LLM removed; vision LLM kept for Twitch tile reading.
@@ -27,8 +27,11 @@
   // (subscription CLI, $0 marginal, ~15-35s/scan, very accurate). When false,
   // scan uses the local Ollama vision model (faster, less accurate).
   let useClaude     = GM_getValue('use_claude_vision', false);
-  // ENABLE1 — public-domain ~173k-word list. Avoids TWL06 (Hasbro-owned).
-  let dictUrl       = GM_getValue('dict_url',       'https://raw.githubusercontent.com/dolph/dictionary/master/enable1.txt');
+  // ENABLE1 — public-domain ~173k list of REAL words only (no abbreviations, no
+  // web-n-gram fragments). This is the locked clean default; the one-time reset
+  // below pulls everyone off any previously-loaded noisy/custom list back onto it.
+  const CLEAN_DICT_URL = 'https://raw.githubusercontent.com/dolph/dictionary/master/enable1.txt';
+  let dictUrl       = GM_getValue('dict_url', CLEAN_DICT_URL);
   // Grade filter: 'all' disables it; otherwise 0 (K) … 12 keeps only words at or
   // below that US school grade (cumulative — easier words included). A word's
   // grade comes from the AoA dataset (grade-words.tsv); words not in it fall back
@@ -50,6 +53,16 @@
   // names before their original declaration sites would have run — TDZ
   // otherwise, and the failures are silent inside async functions.
   const DICT_CACHE_KEY = 'wos_dict_v1';
+  // One-time cleanup: an earlier build let a noisy ~606k web-frequency wordlist
+  // get cached, which surfaced non-words (e.g. "iowd", "goodl"). Force everyone
+  // back onto the clean ENABLE1 list once — reset the stored URL and drop the
+  // cached dictionary so it refetches clean. Guarded so it runs a single time.
+  if (!GM_getValue('dict_reset_clean_v1', false)) {
+    dictUrl = CLEAN_DICT_URL;
+    GM_setValue('dict_url', CLEAN_DICT_URL);
+    GM_setValue(DICT_CACHE_KEY, '');
+    GM_setValue('dict_reset_clean_v1', true);
+  }
   let dictSet     = null;
   let dictByKey   = null;
   let freqRank    = null; // Map<word, rank>. Lower rank = more common.
