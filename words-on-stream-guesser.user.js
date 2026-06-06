@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Words on Stream — Auto Guesser (Local LLM)
 // @namespace    http://tampermonkey.net/
-// @version      4.29
+// @version      4.30
 // @updateURL    https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @downloadURL  https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @description  Twitch tab: scans video + auto-types chat. wos.gg tab: reads tiles from DOM, pre-generates words, hands them to the Twitch tab via GM shared storage. Dict-backed anagram solver (ENABLE1, public domain); text LLM removed; vision LLM kept for Twitch tile reading.
@@ -177,11 +177,15 @@
   /* Clickable word chips — click to send into Twitch chat. Sent words fade
      and strikethrough so the remaining set is obvious. */
   #wos-words-list {
-    display:flex; flex-wrap:wrap; gap:3px;
+    display:block;
     min-height:40px;
     padding:4px; background:rgba(109,40,217,.12);
     border:1px solid rgba(168,85,247,.22); border-radius:5px;
   }
+  /* Words grouped under grade headings (K, 1 … 12). */
+  .wos-grade-group { display:flex; flex-wrap:wrap; gap:3px; align-items:center; margin-bottom:5px; }
+  .wos-grade-label { flex:0 0 100%; font-size:.55rem; color:#a78bfa; letter-spacing:1px;
+    text-transform:uppercase; margin:2px 0 1px; opacity:.8; }
   .wos-word-chip {
     padding:3px 7px; background:linear-gradient(180deg,#7c3aed,#5b21b6);
     border:1px solid #a855f7; border-radius:4px; color:#fff;
@@ -1449,8 +1453,22 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
       container.innerHTML = '<span style="font-size:.65rem;color:#6d28d9;letter-spacing:1px;align-self:center;padding:8px;">No words yet — scan or pull</span>';
       return;
     }
-    container.innerHTML = wordList.map((w, i) =>
-      `<span class="wos-word-chip${w.sent ? ' sent' : ''}" data-i="${i}">${w.word}</span>`
+    // Group chips under grade headings (K, 1 … 12), ascending — common/easy words
+    // on top, rarer high-grade words below. data-i still indexes the live wordList,
+    // so the click handler below is unchanged.
+    const groups = new Map();
+    wordList.forEach((w, i) => {
+      const g = effectiveGrade(w.word);
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(i);
+    });
+    const gradeLabel = g => (g === 0 ? 'K' : String(g));
+    container.innerHTML = [...groups.keys()].sort((a, b) => a - b).map(g =>
+      `<div class="wos-grade-group"><span class="wos-grade-label">Grade ${gradeLabel(g)}</span>` +
+      groups.get(g).map(i =>
+        `<span class="wos-word-chip${wordList[i].sent ? ' sent' : ''}" data-i="${i}">${wordList[i].word}</span>`
+      ).join('') +
+      `</div>`
     ).join('');
     container.querySelectorAll('.wos-word-chip').forEach(chip => {
       chip.addEventListener('click', () => {
