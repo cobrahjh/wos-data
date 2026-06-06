@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Words on Stream — Auto Guesser (Local LLM)
 // @namespace    http://tampermonkey.net/
-// @version      4.30
+// @version      4.31
 // @updateURL    https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @downloadURL  https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @description  Twitch tab: scans video + auto-types chat. wos.gg tab: reads tiles from DOM, pre-generates words, hands them to the Twitch tab via GM shared storage. Dict-backed anagram solver (ENABLE1, public domain); text LLM removed; vision LLM kept for Twitch tile reading.
@@ -1302,24 +1302,29 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
     if (!poolWords.length) return empty;
     const poolKeys = poolWords.map(sortedKey);
 
+    // Score each mask to pick the best-guess letters (shown on the badge), but
+    // also collect the UNION of every word playable under ANY mask. The real
+    // letters are unknown, so all of those are legit candidates — this returns the
+    // MOST words; the Twitch panel groups them by grade (easiest first).
     let best = empty;
+    const playable = new Set();
     for (let mask = 0; mask < (1 << n); mask++) {
       const letters = new Array(n);
       for (let i = 0; i < n; i++) letters[i] = tiles[i][(mask >> i) & 1].letter;
       const maskKey = sortedKey(letters.join(''));
 
-      const words = [];
       let score = 0;
       for (let i = 0; i < poolWords.length; i++) {
         if (isSubKey(poolKeys[i], maskKey)) {
-          const w = poolWords[i];
-          words.push(w);
-          score += w.length * w.length;
+          playable.add(poolWords[i]);
+          score += poolWords[i].length * poolWords[i].length;
         }
       }
-      if (score > best.score) best = { letters, words, score, mask };
+      if (score > best.score) best = { letters, score, mask };
     }
-    return best;
+    // poolWords is already sorted (common/longer first); filter preserves order.
+    const words = poolWords.filter(w => playable.has(w));
+    return { letters: best.letters, words, score: best.score, mask: best.mask };
   }
 
   // ── Chat send ─────────────────────────────────────────────────────────────
