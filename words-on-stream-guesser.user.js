@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Words on Stream — Auto Guesser (Local LLM)
 // @namespace    http://tampermonkey.net/
-// @version      4.27
+// @version      4.28
 // @updateURL    https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @downloadURL  https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @description  Twitch tab: scans video + auto-types chat. wos.gg tab: reads tiles from DOM, pre-generates words, hands them to the Twitch tab via GM shared storage. Dict-backed anagram solver (ENABLE1, public domain); text LLM removed; vision LLM kept for Twitch tile reading.
@@ -243,6 +243,10 @@
     font-size:1rem; cursor:pointer; z-index:2147483647;
     box-shadow:0 0 14px rgba(168,85,247,.65);
   }
+  /* Native <select> popup options inherit the panel's light text but render on a
+     light system background → invisible. Force a readable dark option background. */
+  #wos-grade-level { background:#1a1033 !important; color:#e9d5ff; }
+  #wos-grade-level option { background:#1a1033; color:#e9d5ff; }
 </style>
 
 <h3>⚡ WoS · Local LLM</h3>
