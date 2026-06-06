@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Words on Stream — Auto Guesser (Local LLM)
 // @namespace    http://tampermonkey.net/
-// @version      4.33
+// @version      4.34
 // @updateURL    https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @downloadURL  https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @description  Twitch tab: scans video + auto-types chat. wos.gg tab: reads tiles from DOM, pre-generates words, hands them to the Twitch tab via GM shared storage. Dict-backed anagram solver (ENABLE1, public domain); text LLM removed; vision LLM kept for Twitch tile reading.
@@ -54,20 +54,30 @@
   // names before their original declaration sites would have run — TDZ
   // otherwise, and the failures are silent inside async functions.
   const DICT_CACHE_KEY = 'wos_dict_v1';
-  // One-time cleanup → reset onto the clean, frequency-ranked ENABLE1 list.
-  // (v1 was the noisy ~606k web-frequency list with non-words like "iowd"/"goodl";
-  // the first reset put us on plain alphabetical ENABLE1, which starved the grade
-  // filter. v2 moves to the frequency-ranked clean list.) Resets the stored URL
-  // and drops the cached dictionary so it refetches. Guarded — runs once per bump.
-  if (!GM_getValue('dict_reset_clean_v2', false)) {
-    dictUrl = CLEAN_DICT_URL;
-    GM_setValue('dict_url', CLEAN_DICT_URL);
-    GM_setValue(DICT_CACHE_KEY, '');
-    GM_setValue('dict_reset_clean_v2', true);
+  // One-time cleanup → reset onto the clean, frequency-COUNTED ENABLE1 list.
+  // History: v1 was a noisy ~606k web-frequency list (non-words "iowd"/"goodl");
+  // then plain alphabetical ENABLE1 (starved the grade filter); then ranked-by-
+  // order; now ranked WITH real counts so the rare tail is graded correctly.
+  // Only reset when the stored URL is empty or a KNOWN legacy default — never
+  // clobber a dictionary the user deliberately set. Clears the cache so the new
+  // counted list refetches. Guarded so it runs once.
+  const LEGACY_DICT_URLS = new Set([
+    'https://raw.githubusercontent.com/dolph/dictionary/master/enable1.txt',
+    CLEAN_DICT_URL,
+  ]);
+  if (!GM_getValue('dict_reset_clean_v3', false)) {
+    const storedDictUrl = GM_getValue('dict_url', '');
+    if (!storedDictUrl || LEGACY_DICT_URLS.has(storedDictUrl)) {
+      dictUrl = CLEAN_DICT_URL;
+      GM_setValue('dict_url', CLEAN_DICT_URL);
+      GM_setValue(DICT_CACHE_KEY, '');
+    }
+    GM_setValue('dict_reset_clean_v3', true);
   }
   let dictSet     = null;
   let dictByKey   = null;
   let freqRank    = null; // Map<word, rank>. Lower rank = more common.
+  let dictNoFreq  = null; // Set<word> with no real frequency (dict tail) → graded "rare"
   let dictLoading = null;
   // Bumped whenever a newer dict load (file pick / refresh / URL change) should
   // supersede an in-flight network fetch — fetchDict checks this in onload so a
@@ -377,11 +387,14 @@
   document.getElementById('wos-grade-level').addEventListener('change', e => {
     gradeLevel = e.target.value === 'all' ? 'all' : parseInt(e.target.value, 10);
     GM_setValue('grade_level', gradeLevel);
+    // Changing the filter mid-send would send a different set than shown — stop it.
+    if (sendingAll) stopSendAll('Stopped — filter changed', '#facc15');
     // Re-filter the full set (cumulative, non-destructive — raising the grade re-adds words).
     if (allWords.length) applyFilters(true);
   });
   // Min len also re-filters live from the full set.
   document.getElementById('wos-min-len').addEventListener('input', () => {
+    if (sendingAll) stopSendAll('Stopped — filter changed', '#facc15');
     if (allWords.length) applyFilters(true);
   });
 
@@ -716,7 +729,12 @@
   // Kick off lazy dict + grade-list loads on script start (non-blocking).
   ensureDict().then(setDictStatus);
   setDictStatus();
-  ensureGradeList().then(updateGradeStatus);
+  ensureGradeList().then(() => {
+    updateGradeStatus();
+    // If words were already built with the frequency fallback (grade list still
+    // loading), re-derive the view + grouping now that real AoA grades are in.
+    if (allWords.length) applyFilters(true);
+  });
   updateGradeStatus();
 
   // ── Claude vision via claude-relay (subscription CLI, $0 marginal) ────────
@@ -1095,14 +1113,17 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
     return i === a.length;
   }
 
-  // Accepts both plain wordlists ("word\n") and Norvig-style frequency lists
-  // ("word\tcount\n", sorted by descending frequency). For Norvig format,
-  // file-order rank becomes the frequency signal used to sort suggestions.
+  // Accepts plain wordlists ("word\n") and "word\tcount\n" frequency lists sorted
+  // by descending frequency. File-order rank is the frequency signal for sorting.
+  // A count of exactly 0 marks a word with NO real frequency data (the alphabetical
+  // "rare" tail of the ranked list) — recorded in dictNoFreq so the grade logic
+  // can treat it as rare instead of inferring a grade from its meaningless rank.
   function buildDictIndex(text) {
     const t0 = Date.now();
     dictSet = new Set();
     dictByKey = new Map();
     freqRank = new Map();
+    dictNoFreq = new Set();
     let rank = 0;
     for (const raw of text.split('\n')) {
       const tab = raw.indexOf('\t');
@@ -1110,11 +1131,12 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
       if (w.length < 3 || !/^[A-Z]+$/.test(w) || dictSet.has(w)) continue;
       dictSet.add(w);
       freqRank.set(w, rank++);
+      if (tab >= 0 && parseInt(raw.slice(tab + 1), 10) === 0) dictNoFreq.add(w);
       const k = sortedKey(w);
       const bucket = dictByKey.get(k);
       if (bucket) bucket.push(w); else dictByKey.set(k, [w]);
     }
-    console.log(`[WoS] Dict indexed: ${dictSet.size} words, ${dictByKey.size} keys, ${Date.now() - t0}ms`);
+    console.log(`[WoS] Dict indexed: ${dictSet.size} words (${dictNoFreq.size} rare), ${dictByKey.size} keys, ${Date.now() - t0}ms`);
     return dictSet.size;
   }
 
@@ -1229,22 +1251,31 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
     return gradeLoading;
   }
 
-  // Approximate grade for words NOT in the AoA dataset, from their frequency rank
-  // in the loaded dict (more common ⇒ lower grade). Coarse but monotonic.
+  // Approximate grade for words NOT in the AoA dataset, from their real frequency
+  // rank (more common ⇒ lower grade). Tiers span grade 0–8 across the ~78k
+  // frequency-ranked prefix of the dictionary, so common words aren't over-graded
+  // and "Grade ≤ K" isn't starved. Words with no real frequency are handled by
+  // effectiveGrade (rare bucket), not here.
   function gradeFromFreq(rank) {
-    if (rank == null || !isFinite(rank)) return 12;
-    if (rank < 1000)  return 2;
-    if (rank < 3000)  return 4;
-    if (rank < 8000)  return 6;
-    if (rank < 20000) return 8;
-    if (rank < 60000) return 10;
-    return 12;
+    if (rank == null || !isFinite(rank)) return 11;
+    if (rank < 150)   return 0;   // K — the ~150 most common words
+    if (rank < 600)   return 1;
+    if (rank < 1500)  return 2;
+    if (rank < 4000)  return 3;
+    if (rank < 9000)  return 4;
+    if (rank < 18000) return 5;
+    if (rank < 32000) return 6;
+    if (rank < 50000) return 7;
+    return 8;                     // rest of the real-frequency prefix
   }
 
-  // A word's effective grade: real AoA grade if known, else frequency-derived.
+  // A word's effective grade: real AoA grade if known; else "rare" (11) for the
+  // dictionary's no-frequency tail; else estimated from real frequency rank.
   function effectiveGrade(word) {
     const g = gradeMap && gradeMap.get(word);
-    return g != null ? g : gradeFromFreq(freqRank ? freqRank.get(word) : null);
+    if (g != null) return g;
+    if (dictNoFreq && dictNoFreq.has(word)) return 11; // rare: no real frequency data
+    return gradeFromFreq(freqRank ? freqRank.get(word) : null);
   }
 
   function updateGradeStatus() {
@@ -1317,29 +1348,30 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
     if (!poolWords.length) return empty;
     const poolKeys = poolWords.map(sortedKey);
 
-    // Score each mask to pick the best-guess letters (shown on the badge), but
-    // also collect the UNION of every word playable under ANY mask. The real
-    // letters are unknown, so all of those are legit candidates — this returns the
-    // MOST words; the Twitch panel groups them by grade (easiest first).
+    // Pick the single best-scoring tile combination and return ONLY its words.
+    // (A previous build returned the union across all masks for "more words", but
+    // each tile has one real + one decoy letter, so the union floods the list with
+    // words that use decoy letters and are NOT playable — e.g. WATER appearing for
+    // a rack whose real letters can't spell it. The best-guess combo's words are
+    // the playable set.)
     let best = empty;
-    const playable = new Set();
     for (let mask = 0; mask < (1 << n); mask++) {
       const letters = new Array(n);
       for (let i = 0; i < n; i++) letters[i] = tiles[i][(mask >> i) & 1].letter;
       const maskKey = sortedKey(letters.join(''));
 
+      const words = [];
       let score = 0;
       for (let i = 0; i < poolWords.length; i++) {
         if (isSubKey(poolKeys[i], maskKey)) {
-          playable.add(poolWords[i]);
-          score += poolWords[i].length * poolWords[i].length;
+          const w = poolWords[i];
+          words.push(w);
+          score += w.length * w.length;
         }
       }
-      if (score > best.score) best = { letters, score, mask };
+      if (score > best.score) best = { letters, words, score, mask };
     }
-    // poolWords is already sorted (common/longer first); filter preserves order.
-    const words = poolWords.filter(w => playable.has(w));
-    return { letters: best.letters, words, score: best.score, mask: best.mask };
+    return best;
   }
 
   // ── Chat send ─────────────────────────────────────────────────────────────
@@ -1433,7 +1465,8 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
     if (sendingAll) stopSendAll('Stopped — word list changed', '#facc15');
     // cleanWord() strips anything but A–Z, so a poisoned wos_round_state word
     // (cross-tab GM write) can't survive into the innerHTML chip renderer.
-    allWords = (Array.isArray(words) ? words : []).map(cleanWord);
+    // filter(Boolean) drops words that cleaned to '' so they don't accumulate.
+    allWords = (Array.isArray(words) ? words : []).map(cleanWord).filter(Boolean);
     applyFilters(preserveSent);
   }
 
@@ -1551,6 +1584,7 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
   document.getElementById('wos-btn-clear').addEventListener('click', () => {
     if (sendingAll) stopSendAll();
     wordList = [];
+    allWords = []; // discard the source too, so a later filter tweak can't revive it
     renderWordList();
     setStatus('Words cleared', '#a78bfa');
   });
