@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Words on Stream — Auto Guesser (Local LLM)
 // @namespace    http://tampermonkey.net/
-// @version      4.28
+// @version      4.29
 // @updateURL    https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @downloadURL  https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @description  Twitch tab: scans video + auto-types chat. wos.gg tab: reads tiles from DOM, pre-generates words, hands them to the Twitch tab via GM shared storage. Dict-backed anagram solver (ENABLE1, public domain); text LLM removed; vision LLM kept for Twitch tile reading.
@@ -83,7 +83,8 @@
   let fakeLetters     = [];   // letters marked fake
   // Suggested words shown as clickable chips. Each entry tracks sent state so
   // the chip can fade/strikethrough after the user clicks it.
-  let wordList        = []; // [{ word: string, sent: boolean }]
+  let wordList        = []; // [{ word: string, sent: boolean }] — current filtered view
+  let allWords        = []; // full cleaned word set from the last gen/pull (pre-filter source)
   let scanning        = false; // re-entry guard for the Scan button
   let sendingAll      = false; // Send-all run in progress
   let sendAllTimer    = null;
@@ -357,7 +358,12 @@
   document.getElementById('wos-grade-level').addEventListener('change', e => {
     gradeLevel = e.target.value === 'all' ? 'all' : parseInt(e.target.value, 10);
     GM_setValue('grade_level', gradeLevel);
-    if (wordList.length) setWordList(wordList.map(w => w.word), true);
+    // Re-filter the full set (cumulative, non-destructive — raising the grade re-adds words).
+    if (allWords.length) applyFilters(true);
+  });
+  // Min len also re-filters live from the full set.
+  document.getElementById('wos-min-len').addEventListener('input', () => {
+    if (allWords.length) applyFilters(true);
   });
 
   // ── Tooltips ───────────────────────────────────────────────────────────────
@@ -1392,25 +1398,34 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
   // Replaces the old textarea + ▶ Start queue. Each word renders as a chip;
   // a single click types it into Twitch chat AND fires Enter, then marks the
   // chip as sent (faded + strikethrough) so the remaining set is obvious.
+  // setWordList(words): a NEW full word set (from Gen Words / Pull / auto-load).
+  // Stored UNFILTERED in allWords; applyFilters() derives the visible list. This
+  // is what lets a grade change re-widen (raising the grade re-adds words) instead
+  // of permanently shrinking the list.
   function setWordList(words, preserveSent = false) {
-    // A Send-all run iterates the live wordList; if anything replaces the list
-    // (grade change, Pull, a new auto-loaded round, Gen Words) stop the run so it
-    // can't silently continue on a different word set.
+    // A Send-all run iterates the live wordList; if a NEW source replaces it
+    // (Pull, a new auto-loaded round, Gen Words) stop the run so it can't silently
+    // continue on a different word set.
     if (sendingAll) stopSendAll('Stopped — word list changed', '#facc15');
+    // cleanWord() strips anything but A–Z, so a poisoned wos_round_state word
+    // (cross-tab GM write) can't survive into the innerHTML chip renderer.
+    allWords = (Array.isArray(words) ? words : []).map(cleanWord);
+    applyFilters(preserveSent);
+  }
+
+  // applyFilters(): rebuild the visible wordList from the full allWords source
+  // using the current min-length + grade selection. Called on every filter change,
+  // so the grade is cumulative (≤ selected, includes all lower grades) AND
+  // non-destructive — the list updates live and re-widens when you raise the grade.
+  function applyFilters(preserveSent = false) {
     const minLen = Math.max(4, parseInt(document.getElementById('wos-min-len').value, 10) || 4);
     // Pre-mark words already visible in Twitch chat (or locked on the board) as
-    // "sent" (grey) instead of removing them. They might still be playable, and
-    // seeing the full anagram set gives a better sense of what's possible.
-    // preserveSent keeps manual click state across an in-place filter rebuild
-    // (e.g. changing the grade filter) — but a fresh round must NOT inherit it.
+    // "sent" (grey). preserveSent keeps manual click state across a filter rebuild.
     const skip = new Set([...alreadySentWords(), ...(panel._foundWords || [])]);
     const priorSent = preserveSent
       ? new Set(wordList.filter(e => e.sent).map(e => e.word))
       : null;
-    // cleanWord() strips anything but A–Z, so a poisoned wos_round_state word
-    // (cross-tab GM write) can't survive into the innerHTML chip renderer.
-    wordList = (Array.isArray(words) ? words : [])
-      .map(cleanWord)
+    wordList = allWords
       .filter(w => w.length >= minLen)
       // Grade filter: keep words at or below the selected grade (cumulative).
       // effectiveGrade() uses real AoA data, else a frequency-derived grade.
