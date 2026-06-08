@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Words on Stream — Auto Guesser (Local LLM)
 // @namespace    http://tampermonkey.net/
-// @version      4.34
+// @version      4.36
 // @updateURL    https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @downloadURL  https://raw.githubusercontent.com/cobrahjh/wos-data/main/words-on-stream-guesser.user.js
 // @description  Twitch tab: scans video + auto-types chat. wos.gg tab: reads tiles from DOM, pre-generates words, hands them to the Twitch tab via GM shared storage. Dict-backed anagram solver (ENABLE1, public domain); text LLM removed; vision LLM kept for Twitch tile reading.
@@ -106,6 +106,12 @@
   // ── State (twitch.tv branch) ──────────────────────────────────────────────
   let detectedLetters = [];   // all letters from scan
   let fakeLetters     = [];   // letters marked fake
+  // wos.gg tile-pair mode: when a round is pulled/auto-loaded from the companion
+  // tab, each tile carries TWO candidate letters (one real, one decoy). In that
+  // mode `tilePairs` drives the letter area instead of the flat detectedLetters/
+  // fakeLetters model; null means we're in the vision/manual flat mode.
+  // Shape: [{ cands: ['W','M'], real: 0 }, …] — `real` indexes the chosen letter.
+  let tilePairs       = null;
   // Suggested words shown as clickable chips. Each entry tracks sent state so
   // the chip can fade/strikethrough after the user clicks it.
   let wordList        = []; // [{ word: string, sent: boolean }] — current filtered view
@@ -257,6 +263,19 @@
   .lchip .badge:hover { background:#dc2626; transform:scale(1.15); }
   .lchip.fake .badge { background:#f87171; }
   .chip-hint { font-size:.62rem; color:#6d28d9; letter-spacing:1px; align-self:center; }
+
+  /* wos.gg tile-pair mode: two candidate letters per tile, click to pick the
+     real one (purple); the decoy renders .fake (red). */
+  .wos-tile-pair {
+    display:inline-flex; gap:2px; align-items:flex-start;
+    padding:3px; border:1px solid rgba(168,85,247,.35); border-radius:7px;
+  }
+  .wos-tile-pair .lchip { padding:4px 7px; font-size:.82rem; box-shadow:none; }
+  .wos-tile-x {
+    cursor:pointer; color:#6d28d9; font-size:.68rem; padding:0 1px; line-height:1;
+    align-self:flex-start; user-select:none;
+  }
+  .wos-tile-x:hover { color:#dc2626; transform:scale(1.15); }
 
   #wos-fake-list {
     font-size:.68rem; color:#f87171; letter-spacing:1px;
@@ -434,7 +453,7 @@
       <h1 style="color:#c084fc;">⚡ Words on Stream — Auto Guesser</h1>
       <p>Reads the letter tiles, solves the anagrams, and lets you send words into Twitch chat.</p>
       <h2 style="color:#a78bfa;">Quick start</h2>
-      <p><b>Companion mode (easiest):</b> open the <b>wos.gg</b> room tab and the <b>twitch.tv</b> channel tab. The wos.gg tab solves each round and pushes words to Twitch automatically — or click <b>📥 Pull from wos.gg tab</b>. Then click a word to send it, or use <b>▶ Send all</b>.</p>
+      <p><b>Companion mode (easiest):</b> open the <b>wos.gg</b> room tab and the <b>twitch.tv</b> channel tab. The wos.gg tab solves each round and pushes words to Twitch automatically — or click <b>📥 Pull from wos.gg tab</b>. Then click a word to send it, or use <b>▶ Send all</b>. Each pulled tile shows <b>both</b> candidate letters — click the real one to flip a misjudged fake, then <b>⚡ Gen Words</b> re-solves.</p>
       <p><b>Vision mode (no companion tab):</b> on the Twitch tab click <b>🔍 Scan Letters</b>, pick the stream window to share, fix any misread letters (click a chip to mark it fake, click ✕ to remove), then <b>⚡ Gen Words</b>.</p>
       <h2 style="color:#a78bfa;">Sending words</h2>
       <ul>
@@ -478,6 +497,7 @@
   });
   picker.addEventListener('click', e => {
     if (!e.target.classList.contains('wos-pick-letter')) return;
+    exitPairMode(); // manual edit leaves tile-pair mode (keeps current real picks)
     detectedLetters.push(e.target.dataset.letter);
     renderLetters();
     document.getElementById('wos-btn-genwords').disabled = false;
@@ -491,12 +511,25 @@
   letterInput.addEventListener('input', e => {
     const text = (e.target.value || '').toUpperCase().replace(/[^A-Z]/g, '');
     if (!text) { e.target.value = ''; return; }
+    exitPairMode(); // manual edit leaves tile-pair mode (keeps current real picks)
     for (const L of text) detectedLetters.push(L);
     renderLetters();
     document.getElementById('wos-btn-genwords').disabled = false;
     e.target.value = '';
   });
   letterInput.addEventListener('keydown', e => {
+    // Pair mode keeps its tiles in tilePairs (detectedLetters is empty), so the
+    // flat Backspace branch below can never fire — handle tile removal here.
+    if (e.key === 'Backspace' && !e.target.value && tilePairs && tilePairs.length) {
+      e.preventDefault();
+      tilePairs.pop();
+      if (!tilePairs.length) {
+        tilePairs = null;
+        document.getElementById('wos-btn-genwords').disabled = true;
+      }
+      renderLetters();
+      return;
+    }
     if (e.key === 'Backspace' && !e.target.value && detectedLetters.length > 0) {
       e.preventDefault();
       const removedIdx = detectedLetters.length - 1;
@@ -875,6 +908,7 @@
 
   // ── Render letter chips (clickable to toggle fake) ────────────────────────
   function renderLetters() {
+    if (tilePairs) { renderTilePairs(); return; }
     const wrap = document.getElementById('wos-letters-wrap');
     if (!detectedLetters.length) {
       wrap.innerHTML = '<span class="chip-hint">No scan yet</span>';
@@ -926,8 +960,52 @@
     updateFakeList();
   }
 
+  // Render wos.gg tiles as candidate pairs: both letters show; the chosen real
+  // letter is purple, the decoy red. Click either to flip which is real; the ✕
+  // drops the whole tile. Re-derive words with ⚡ Gen Words afterward.
+  function renderTilePairs() {
+    const wrap = document.getElementById('wos-letters-wrap');
+    wrap.innerHTML = tilePairs.map((t, ti) =>
+      `<span class="wos-tile-pair" title="Tile ${ti + 1}: click the real letter">` +
+      t.cands.map((L, ci) =>
+        `<span class="lchip${ci === t.real ? '' : ' fake'}" data-tile="${ti}" data-cand="${ci}">${L}</span>`
+      ).join('') +
+      `<span class="wos-tile-x" data-tilex="${ti}" title="Remove this tile">✕</span></span>`
+    ).join('');
+
+    wrap.querySelectorAll('.lchip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const ti = parseInt(chip.dataset.tile, 10);
+        const ci = parseInt(chip.dataset.cand, 10);
+        if (!tilePairs[ti]) return;
+        tilePairs[ti].real = ci;
+        renderTilePairs();
+      });
+    });
+    wrap.querySelectorAll('.wos-tile-x').forEach(x => {
+      x.addEventListener('click', e => {
+        e.stopPropagation();
+        tilePairs.splice(parseInt(x.dataset.tilex, 10), 1);
+        if (!tilePairs.length) {
+          tilePairs = null;
+          document.getElementById('wos-btn-genwords').disabled = true;
+        }
+        renderLetters();
+      });
+    });
+
+    updateFakeList();
+  }
+
   function updateFakeList() {
     const el = document.getElementById('wos-fake-list');
+    if (tilePairs) {
+      const real   = tilePairs.map(t => t.cands[t.real]);
+      const decoys = tilePairs.flatMap(t => t.cands.filter((_, i) => i !== t.real));
+      el.textContent = `Real: ${real.join(' ')} — Decoys: ${decoys.join(' ')}`;
+      el.style.color = '#f87171';
+      return;
+    }
     if (!fakeLetters.length) {
       el.textContent = 'No fake letters marked';
       el.style.color = '#6d28d9';
@@ -939,14 +1017,62 @@
   }
 
   function getRealLetters() {
+    if (tilePairs) return tilePairs.map(t => t.cands[t.real]);
     const fakeIndices = new Set(fakeLetters.map(k => parseInt(k.split(':')[1])));
     return detectedLetters.filter((_, i) => !fakeIndices.has(i));
+  }
+
+  // Leave tile-pair mode, flattening the current real picks into the flat
+  // detectedLetters model so a manual edit (picker / keyboard) doesn't lose them.
+  function exitPairMode() {
+    if (!tilePairs) return;
+    detectedLetters = getRealLetters(); // still reads tilePairs — capture before nulling
+    fakeLetters = [];
+    tilePairs = null;
+  }
+
+  // Populate tile-pair mode from a wos.gg round state. Each tile's two candidate
+  // letters come from state.tilePairs; the initially-real pick defaults to the
+  // solver's best guess (state.letters) so you only flip what it got wrong.
+  // Returns false (and restores flat mode) for older state without tilePairs.
+  function loadTilePairs(state) {
+    const pairs = Array.isArray(state && state.tilePairs) ? state.tilePairs : [];
+    const best  = Array.isArray(state && state.letters)   ? state.letters   : [];
+    const prev  = tilePairs; // capture current picks to preserve user flips on re-tick
+    const built = pairs.map((p, i) => {
+      // Require EXACTLY two single-letter candidates. A poisoned pair like
+      // ["ABCD","E"] would otherwise explode into 6 chips and desync the solver.
+      const cands = (Array.isArray(p) ? p : []).map(cleanWord).filter(w => w.length === 1);
+      if (cands.length !== 2) return null;
+      let real = cands.indexOf(cleanWord(best[i] || ''));
+      if (real < 0) real = 0;
+      // Same tile (same candidate set) re-published for the same round → keep the
+      // user's flip instead of snapping back to the solver's pick (F2).
+      if (prev && prev[i] && prev[i].cands.join('') === cands.join('')) real = prev[i].real;
+      return { cands, real };
+    }).filter(Boolean);
+    // Reject a partial set: if any tile failed validation, the letter UI would
+    // show fewer tiles than the already-loaded word list solves for (F4). Treat
+    // it as "no tiles" so the panel stays consistent.
+    if (!built.length || built.length !== pairs.length) {
+      if (tilePairs) { tilePairs = null; renderLetters(); } // drop stale pairs from a prior pull
+      return false;
+    }
+    tilePairs       = built;
+    detectedLetters = []; // pair mode owns the letter area
+    fakeLetters     = [];
+    renderLetters();
+    document.getElementById('wos-btn-genwords').disabled = false;
+    return true;
   }
 
   // ── Scan ──────────────────────────────────────────────────────────────────
   document.getElementById('wos-btn-scan').addEventListener('click', async () => {
     if (scanning) return; // re-entry guard: overlapping scans race on shared state
     scanning = true;
+    // Entering vision mode — drop any companion tile-pair view up front so a
+    // capture-denied or errored scan can't strand us in pair mode (F5).
+    if (tilePairs) { tilePairs = null; renderLetters(); }
     const scanBtn = document.getElementById('wos-btn-scan');
     const scanBtnLabel = scanBtn.textContent;
     scanBtn.disabled = true;
@@ -986,6 +1112,7 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
       // innerHTML chip renderer or the solver. Multi-char entries ("CAT") split
       // into letters; injection payloads collapse to nothing.
       detectedLetters = cleanLetters(info.letters);
+      tilePairs = null; // a fresh vision scan replaces any pulled tile pairs
 
       // Intentionally NOT auto-marking fakes from the LLM — vision models are
       // unreliable at distinguishing fake tiles, and false positives drop real
@@ -1564,8 +1691,12 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
     // setWordList marks chat-already-said words as sent (grey) rather than
     // removing them, so the user sees the full set.
     setWordList(state.words);
+    const gotTiles = loadTilePairs(state); // also show the tile letters so fakes can be flipped
     const remaining = remainingCount();
-    setStatus(`✅ Pulled ${remaining}/${wordList.length} words (L${state.level}, ${ageSec}s old)`, '#4ade80');
+    setStatus(
+      `✅ Pulled ${remaining}/${wordList.length} words (L${state.level}, ${ageSec}s old)` +
+      (gotTiles ? ` · ${tilePairs.length} tiles — flip fakes then ⚡` : ''),
+      '#4ade80');
   });
 
   // ✕ Letters — clears only the scan-letter chips + fake state. Word
@@ -1573,6 +1704,7 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
   document.getElementById('wos-btn-clear-letters').addEventListener('click', () => {
     detectedLetters = [];
     fakeLetters = [];
+    tilePairs = null;
     panel._foundWords = [];
     renderLetters();
     document.getElementById('wos-btn-genwords').disabled = true;
@@ -1666,8 +1798,16 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
     // Pass the full list (same as Pull) — setWordList greys chat-seen words
     // rather than dropping them, so the auto path and Pull stay consistent.
     setWordList(newVal.words);
+    // Don't discard an in-progress vision/manual letter row on a background push:
+    // only adopt companion tiles when already in pair mode or the row is empty (F1).
+    // Pull (explicit click) is unguarded — there, replacing is the user's intent.
+    const keepLocal = !tilePairs && detectedLetters.length;
+    const gotTiles = keepLocal ? false : loadTilePairs(newVal);
     const remaining = remainingCount();
-    setStatus(`🔄 Auto-loaded L${newVal.level} · ${remaining}/${wordList.length} words`, '#4ade80');
+    setStatus(
+      `🔄 Auto-loaded L${newVal.level} · ${remaining}/${wordList.length} words` +
+      (gotTiles ? ` · ${tilePairs.length} tiles` : keepLocal ? ' · kept your letters' : ''),
+      '#4ade80');
   });
 
   // Initial render so the empty-state message shows up.
@@ -1776,7 +1916,39 @@ Reply with ONLY this JSON structure, no preamble, no markdown fences, no example
     }
 
     const tickId = setInterval(tick, 800);
-    window.addEventListener('pagehide', () => clearInterval(tickId));
+
+    // Background tabs throttle setInterval hard (Chrome: ~1/s, then ~1/min after
+    // ~5 min hidden), so the timer above lags a new round badly when the Twitch
+    // tab is focused and wos.gg sits in the background — the user clicks Pull and
+    // gets the previous round's words. A MutationObserver fires on the actual
+    // tile/level DOM change even in a hidden tab (observers aren't timer-throttled),
+    // so the solve + publish happen within ms regardless of focus. Debounced so a
+    // burst of round-transition mutations collapses into one solve once the DOM
+    // settles; tick()'s busy + lastKey guards make extra calls cheap no-ops.
+    let moTimer = null;
+    const observer = new MutationObserver(muts => {
+      if (moTimer) return;
+      // Ignore our own badge text/child updates — setBadge() mutates a node inside
+      // document.body, which would otherwise feed back and self-trigger ticks.
+      if (muts.every(m => badge === m.target || badge.contains(m.target))) return;
+      moTimer = setTimeout(() => { moTimer = null; tick(); }, 150);
+    });
+    // Defer-with-retry exactly like mount() above: if the script runs before
+    // <body> exists, a one-shot `if (document.body)` would leave the observer
+    // permanently un-attached and silently fall back to the throttled timer.
+    // mount() is scheduled first, so the badge is appended before we observe —
+    // its append never lands as a spurious first mutation here.
+    const startObserver = () => {
+      if (!document.body) { setTimeout(startObserver, 100); return; }
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    };
+    startObserver();
+
+    window.addEventListener('pagehide', () => {
+      clearInterval(tickId);
+      observer.disconnect();
+      if (moTimer) { clearTimeout(moTimer); moTimer = null; }
+    });
   }
 
 })();
