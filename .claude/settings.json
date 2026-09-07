@@ -1,11 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "mcp__github__pull_request_read",
+      "Bash(git merge-base *)",
+      "mcp__Mcphive1__hive_file_tail",
       "mcp__Mcphive1__hive_git_state",
+      "mcp__Mcphive1__hive_health_snapshot",
       "mcp__Mcphive1__hive_lan_fetch",
+      "mcp__Mcphive1__hive_mesh_state",
+      "mcp__Mcphive1__hive_obs_state",
       "mcp__Mcphive1__hive_pm2_logs",
-      "Bash(git merge-base *)"
+      "mcp__github__pull_request_read"
     ]
   }
 }
